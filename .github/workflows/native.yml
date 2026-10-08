@@ -24,6 +24,11 @@ jobs:
           if ($LASTEXITCODE) { throw 'Clipboard test failed' }
           ./build/clipqueue-console.exe --probe | Tee-Object build/memory-windows.json
           if ($LASTEXITCODE) { throw 'Daemon probe failed' }
+      - name: Test real-window keyboard paste
+        timeout-minutes: 3
+        run: |
+          ./build/integration-test.exe "$pwd/build/clipqueue-console.exe"
+          if ($LASTEXITCODE) { throw 'Windows keyboard integration failed' }
       - name: Package
         run: |
           New-Item -ItemType Directory -Force build/package | Out-Null
@@ -43,6 +48,11 @@ jobs:
           build/core-test
           build/ClipQueue.app/Contents/MacOS/clipqueue --self-test
           build/ClipQueue.app/Contents/MacOS/clipqueue --probe | tee build/memory-macos.json
+      - name: Test real-window keyboard paste
+        timeout-minutes: 3
+        run: |
+          clang -fobjc-arc -Wall -Wextra -Wno-deprecated-declarations tests/macos/integration.m -framework AppKit -framework ApplicationServices -o build/integration-test
+          build/integration-test "$PWD/build/ClipQueue.app/Contents/MacOS/clipqueue"
       - name: Package
         run: |
           mkdir -p build/package

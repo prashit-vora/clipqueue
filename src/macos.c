@@ -22,9 +22,8 @@ static CqQueue queue;
 static PasteboardRef board;
 static CFMachPortRef tap;
 static CFRunLoopSourceRef paste_source;
-static int control_fd = -1, lock_fd = -1, pending, held[128];
-static pid_t paste_pid;
-static CGKeyCode paste_key;
+static int control_fd = -1, lock_fd = -1, held[128];
+static CqRequests requests;
 static CFAbsoluteTime last_paste;
 static volatile sig_atomic_t stopping;
 static char directory[80], socket_path[104];
@@ -171,10 +170,11 @@ static pid_t front_pid(void) {
 }
 static void perform_paste(void *unused) {
     (void)unused;
-    if (!pending)
+    CqPasteRequest *request = cq_next_request(&requests);
+    if (!request)
         return;
-    if (front_pid() != paste_pid) {
-        pending = 0;
+    if ((uintptr_t)front_pid() != request->target) {
+        cq_cancel_requests(&requests);
         notice();
         return;
     }
@@ -182,14 +182,14 @@ static void perform_paste(void *unused) {
         return;
     capture();
     CqItem *p = queue.enabled ? cq_peek(&queue) : NULL;
-    CGEventRef down = CGEventCreateKeyboardEvent(NULL, paste_key, true),
-               up = CGEventCreateKeyboardEvent(NULL, paste_key, false);
+    CGEventRef down = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)request->key, true),
+               up = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)request->key, false);
     if (!down || !up || !CGPreflightPostEventAccess() || (p && !publish(p))) {
         if (down)
             CFRelease(down);
         if (up)
             CFRelease(up);
-        pending = 0;
+        cq_cancel_requests(&requests);
         notice();
         return;
     }
@@ -202,9 +202,9 @@ static void perform_paste(void *unused) {
     CFRelease(down);
     CFRelease(up);
     if (p)
-        cq_pop(&queue);
+        cq_commit(&queue);
     last_paste = CFAbsoluteTimeGetCurrent();
-    pending = 0;
+    cq_finish_request(&requests);
 }
 static CGEventRef keyboard(CGEventTapProxy proxy, CGEventType type, CGEventRef event,
                            void *unused) {
@@ -238,6 +238,7 @@ static CGEventRef keyboard(CGEventTapProxy proxy, CGEventType type, CGEventRef e
     int q = (length == 1 && (chars[0] == 'q' || chars[0] == 'Q')) || code == 12;
     if (flags == (kCGEventFlagMaskCommand | kCGEventFlagMaskAlternate) && (q || code == 51)) {
         held[code] = 1;
+        cq_cancel_requests(&requests);
         if (q) {
             cq_enable(&queue, !queue.enabled);
             PasteboardSynchronize(board);
@@ -246,14 +247,12 @@ static CGEventRef keyboard(CGEventTapProxy proxy, CGEventType type, CGEventRef e
         notice();
         return NULL;
     }
-    if (flags == kCGEventFlagMaskCommand && v && queue.enabled && queue.count) {
+    if (flags == kCGEventFlagMaskCommand && v && queue.enabled && (queue.count || requests.count)) {
         held[code] = 1;
-        if (!pending) {
-            paste_pid = front_pid();
-            paste_key = (CGKeyCode)code;
-            pending = 1;
+        if (cq_request(&requests, (uintptr_t)front_pid(), code))
             CFRunLoopSourceSignal(paste_source);
-        }
+        else
+            notice();
         return NULL;
     }
     return event;
@@ -300,21 +299,32 @@ static void controls(void) {
     if (!strcmp(command, "on")) {
         cq_enable(&queue, 1);
         PasteboardSynchronize(board);
-    } else if (!strcmp(command, "off"))
+    } else if (!strcmp(command, "off")) {
+        cq_cancel_requests(&requests);
         cq_enable(&queue, 0);
-    else if (!strcmp(command, "toggle")) {
+    } else if (!strcmp(command, "toggle")) {
+        cq_cancel_requests(&requests);
         cq_enable(&queue, !queue.enabled);
         PasteboardSynchronize(board);
-    } else if (!strcmp(command, "clear"))
+    } else if (!strcmp(command, "clear")) {
+        cq_cancel_requests(&requests);
         cq_clear(&queue);
-    else if (!strcmp(command, "stop"))
+    } else if (!strcmp(command, "undo")) {
+        cq_cancel_requests(&requests);
+        if (cq_undo(&queue) < 0)
+            valid = -1;
+    } else if (!strcmp(command, "stop"))
         stopping = 1;
     else if (strcmp(command, "status"))
         valid = 0;
     char reply[160];
-    snprintf(reply, sizeof(reply),
-             valid ? "ClipQueue: %s, %zu queued, keyboard %s\n" : "Unknown command: %s\n",
-             queue.enabled ? "on" : "off", queue.count, tap ? "ready" : "permission required");
+    if (valid == -1)
+        snprintf(reply, sizeof(reply), "Cannot restore: queue is full.\n");
+    else if (!valid)
+        snprintf(reply, sizeof(reply), "Unknown command: %s\n", command);
+    else
+        snprintf(reply, sizeof(reply), "ClipQueue: %s, %zu queued, keyboard %s\n",
+                 queue.enabled ? "on" : "off", queue.count, tap ? "ready" : "permission required");
     sendto(control_fd, reply, strlen(reply), 0, (struct sockaddr *)&peer, size);
 }
 static void tick(CFRunLoopTimerRef timer, void *unused) {
@@ -322,7 +332,7 @@ static void tick(CFRunLoopTimerRef timer, void *unused) {
     (void)unused;
     controls();
     capture();
-    if (pending)
+    if (requests.count)
         perform_paste(NULL);
     if (stopping)
         CFRunLoopStop(CFRunLoopGetCurrent());
@@ -426,7 +436,7 @@ static int command(const char *cmd, int quiet) {
         reply[n] = 0;
         if (!quiet)
             fputs(reply, stdout);
-        return 0;
+        return strncmp(reply, "Cannot restore:", 15) == 0 ? 1 : 0;
     }
     if (!quiet)
         fputs("ClipQueue is not running.\n", stderr);
@@ -479,8 +489,8 @@ int main(int argc, char **argv) {
         return ready ? 0 : 1;
     }
     if (strcmp(arg, "status") && strcmp(arg, "on") && strcmp(arg, "off") && strcmp(arg, "toggle") &&
-        strcmp(arg, "clear") && strcmp(arg, "stop")) {
-        fputs("Usage: clipqueue [start|status|on|off|toggle|clear|stop]\n", stderr);
+        strcmp(arg, "clear") && strcmp(arg, "undo") && strcmp(arg, "stop")) {
+        fputs("Usage: clipqueue [start|status|on|off|toggle|clear|undo|stop]\n", stderr);
         return 2;
     }
     return command(arg, 0);

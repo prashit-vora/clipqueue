@@ -15,16 +15,17 @@
 #define WM_QUEUE_PASTE (WM_APP + 2)
 #define OWN_INPUT ((ULONG_PTR)0x43515545)
 static CqQueue queue;
-static HWND window, paste_target;
+static HWND window;
+static CqRequests requests;
 static HHOOK hook;
 static UINT png_format;
 static DWORD seen_sequence, own_sequence;
-static int v_held, pending, paste_attempts, capture_attempts;
+static int v_held, paste_attempts, capture_attempts;
 static ULONGLONG last_paste;
 static IWICImagingFactory *wic;
 static int com_initialized;
 
-enum { CMD_STATUS = 1, CMD_ON, CMD_OFF, CMD_TOGGLE, CMD_CLEAR, CMD_STOP };
+enum { CMD_STATUS = 1, CMD_ON, CMD_OFF, CMD_TOGGLE, CMD_CLEAR, CMD_STOP, CMD_UNDO };
 static void notice(int ok) {
     MessageBeep(ok ? MB_OK : MB_ICONEXCLAMATION);
 }
@@ -238,16 +239,30 @@ static int send_paste(void) {
     }
     return SendInput(n, input, sizeof(INPUT)) == n;
 }
+static void cancel_pastes(void) {
+    cq_cancel_requests(&requests);
+    paste_attempts = 0;
+    KillTimer(window, 2);
+}
 static void paste(void) {
-    if (!pending)
+    CqPasteRequest *request = cq_next_request(&requests);
+    if (!request)
         return;
-    if (GetForegroundWindow() != paste_target) {
-        pending = 0;
+    if ((uintptr_t)GetForegroundWindow() != request->target) {
+        cancel_pastes();
         notice(0);
         return;
     }
     if (GetTickCount64() - last_paste < 150) {
-        SetTimer(window, 2, 25, NULL);
+        SetTimer(window, 2, 10, NULL);
+        return;
+    }
+    /* A modifier pressed after the original V must not turn the replay into a different shortcut.
+     */
+    if ((GetAsyncKeyState(VK_MENU) | GetAsyncKeyState(VK_SHIFT) | GetAsyncKeyState(VK_LWIN) |
+         GetAsyncKeyState(VK_RWIN)) &
+        0x8000) {
+        SetTimer(window, 2, 10, NULL);
         return;
     }
     capture();
@@ -257,17 +272,22 @@ static void paste(void) {
             SetTimer(window, 2, 25, NULL);
             return;
         }
-        pending = 0;
+        cancel_pastes();
         notice(0);
         return;
     }
-    if (send_paste()) {
-        if (p)
-            cq_pop(&queue);
-        last_paste = GetTickCount64();
-    } else
+    if (!send_paste()) {
+        cancel_pastes();
         notice(0);
-    pending = 0;
+        return;
+    }
+    if (p)
+        cq_commit(&queue);
+    last_paste = GetTickCount64();
+    paste_attempts = 0;
+    cq_finish_request(&requests);
+    if (requests.count)
+        SetTimer(window, 2, 10, NULL);
 }
 static LRESULT CALLBACK keyboard(int code, WPARAM msg, LPARAM value) {
     KBDLLHOOKSTRUCT *key = (KBDLLHOOKSTRUCT *)value;
@@ -279,16 +299,15 @@ static LRESULT CALLBACK keyboard(int code, WPARAM msg, LPARAM value) {
         if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
             if (v_held)
                 return 1;
-            if (queue.enabled && queue.count && (GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
-                !(GetAsyncKeyState(VK_MENU) & 0x8000) && !(GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
-                !(GetAsyncKeyState(VK_LWIN) & 0x8000) && !(GetAsyncKeyState(VK_RWIN) & 0x8000)) {
+            if (queue.enabled && (queue.count || requests.count) &&
+                (GetAsyncKeyState(VK_CONTROL) & 0x8000) && !(GetAsyncKeyState(VK_MENU) & 0x8000) &&
+                !(GetAsyncKeyState(VK_SHIFT) & 0x8000) && !(GetAsyncKeyState(VK_LWIN) & 0x8000) &&
+                !(GetAsyncKeyState(VK_RWIN) & 0x8000)) {
                 v_held = 1;
-                if (!pending) {
-                    pending = 1;
-                    paste_attempts = 0;
-                    paste_target = GetForegroundWindow();
+                if (cq_request(&requests, (uintptr_t)GetForegroundWindow(), 'V'))
                     PostMessageW(window, WM_QUEUE_PASTE, 0, 0);
-                }
+                else
+                    notice(0);
                 return 1;
             }
         }
@@ -322,14 +341,22 @@ static LRESULT CALLBACK procedure(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             seen_sequence = GetClipboardSequenceNumber();
             break;
         case CMD_OFF:
+            cancel_pastes();
             cq_enable(&queue, 0);
             break;
         case CMD_TOGGLE:
+            cancel_pastes();
             cq_enable(&queue, !queue.enabled);
             seen_sequence = GetClipboardSequenceNumber();
             break;
         case CMD_CLEAR:
+            cancel_pastes();
             cq_clear(&queue);
+            break;
+        case CMD_UNDO:
+            cancel_pastes();
+            if (cq_undo(&queue) < 0)
+                return -1;
             break;
         case CMD_STOP:
             PostQuitMessage(0);
@@ -435,10 +462,11 @@ static int run(const wchar_t *arg) {
                    : !wcscmp(arg, L"off")    ? CMD_OFF
                    : !wcscmp(arg, L"toggle") ? CMD_TOGGLE
                    : !wcscmp(arg, L"clear")  ? CMD_CLEAR
+                   : !wcscmp(arg, L"undo")   ? CMD_UNDO
                    : !wcscmp(arg, L"stop")   ? CMD_STOP
                                              : 0;
     if (!cmd) {
-        fprintf(stderr, "Usage: clipqueue [start|status|on|off|toggle|clear|stop]\n");
+        fprintf(stderr, "Usage: clipqueue [start|status|on|off|toggle|clear|undo|stop]\n");
         return 2;
     }
     if (!running) {
@@ -448,6 +476,10 @@ static int run(const wchar_t *arg) {
     DWORD_PTR reply = 0;
     if (!SendMessageTimeoutW(running, WM_CONTROL, cmd, 0, SMTO_ABORTIFHUNG, 2000, &reply) || !reply)
         return 1;
+    if (reply == (DWORD_PTR)-1) {
+        fputs("Cannot restore: queue is full.\n", stderr);
+        return 1;
+    }
     printf("ClipQueue: %s, %llu queued\n", (reply - 1) & 1 ? "on" : "off",
            (unsigned long long)((reply - 1) / 2));
     return 0;

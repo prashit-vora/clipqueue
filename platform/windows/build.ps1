@@ -18,4 +18,6 @@ if ($LASTEXITCODE) { throw 'Windows build failed' }
 if ($LASTEXITCODE) { throw 'Windows test backend build failed' }
 & cl @common tests/portable/core_test.c src/core.c src/sha256.c /Febuild/core-test.exe
 if ($LASTEXITCODE) { throw 'Core tests build failed' }
+& cl @common tests/windows/integration.c /Febuild/integration-test.exe user32.lib
+if ($LASTEXITCODE) { throw 'Integration tests build failed' }
 Remove-Item *.obj -ErrorAction SilentlyContinue

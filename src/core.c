@@ -68,7 +68,30 @@ void cq_pop(CqQueue *q) {
     cq_free(q->items[0]);
     memmove(q->items, q->items + 1, --q->count * sizeof(*q->items));
 }
+void cq_commit(CqQueue *q) {
+    if (!q->count)
+        return;
+    cq_free(q->last_paste);
+    q->last_paste = q->items[0];
+    q->bytes -= q->last_paste->size;
+    memmove(q->items, q->items + 1, --q->count * sizeof(*q->items));
+}
+int cq_undo(CqQueue *q) {
+    if (!q->last_paste)
+        return 0;
+    if (q->count == CQ_MAX_ITEMS || q->last_paste->size > CQ_MAX_BYTES - q->bytes)
+        return -1;
+    memmove(q->items + 1, q->items, q->count * sizeof(*q->items));
+    q->items[0] = q->last_paste;
+    q->count++;
+    q->bytes += q->last_paste->size;
+    q->last_paste = NULL;
+    q->has_previous = 0;
+    return 1;
+}
 void cq_clear(CqQueue *q) {
+    cq_free(q->last_paste);
+    q->last_paste = NULL;
     while (q->count)
         cq_pop(q);
     q->has_previous = 0;
@@ -76,4 +99,23 @@ void cq_clear(CqQueue *q) {
 void cq_enable(CqQueue *q, int enabled) {
     q->enabled = !!enabled;
     q->has_previous = 0;
+}
+
+int cq_request(CqRequests *r, uintptr_t target, unsigned key) {
+    if (r->count == CQ_MAX_ITEMS)
+        return 0;
+    r->items[(r->head + r->count++) % CQ_MAX_ITEMS] = (CqPasteRequest){target, key};
+    return 1;
+}
+CqPasteRequest *cq_next_request(CqRequests *r) {
+    return r->count ? &r->items[r->head] : NULL;
+}
+void cq_finish_request(CqRequests *r) {
+    if (r->count) {
+        r->head = (r->head + 1) % CQ_MAX_ITEMS;
+        r->count--;
+    }
+}
+void cq_cancel_requests(CqRequests *r) {
+    r->head = r->count = 0;
 }

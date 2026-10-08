@@ -15,6 +15,7 @@ typedef struct CqItem {
 typedef struct {
     CqItem *items[CQ_MAX_ITEMS];
     size_t count, bytes;
+    CqItem *last_paste;
     unsigned char previous[32];
     int has_previous, previous_image, enabled;
 } CqQueue;
@@ -26,6 +27,22 @@ void cq_pixel_hash(CqItem *item, const void *rgba, uint32_t width, uint32_t heig
 int cq_push(CqQueue *queue, CqItem *item);
 CqItem *cq_peek(CqQueue *queue);
 void cq_pop(CqQueue *queue);
+/* Retain the last dispatched item for one-level undo. */
+void cq_commit(CqQueue *queue);
+/* 1=restored, 0=nothing to restore, -1=capacity reached; failure preserves undo. */
+int cq_undo(CqQueue *queue);
+typedef struct {
+    uintptr_t target;
+    unsigned key;
+} CqPasteRequest;
+typedef struct {
+    CqPasteRequest items[CQ_MAX_ITEMS];
+    size_t head, count;
+} CqRequests;
+int cq_request(CqRequests *requests, uintptr_t target, unsigned key);
+CqPasteRequest *cq_next_request(CqRequests *requests);
+void cq_finish_request(CqRequests *requests);
+void cq_cancel_requests(CqRequests *requests);
 void cq_clear(CqQueue *queue);
 void cq_enable(CqQueue *queue, int enabled);
 #endif
