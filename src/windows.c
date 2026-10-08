@@ -162,6 +162,12 @@ static void capture(void) {
     DWORD sequence = GetClipboardSequenceNumber();
     if (!queue.enabled || sequence == seen_sequence || sequence == own_sequence)
         return;
+    /* Windows may synthesize extra formats and change the sequence after CloseClipboard.
+       Our ownership, not only the earlier sequence, identifies these as our own writes. */
+    if (GetClipboardOwner() == window) {
+        seen_sequence = sequence;
+        return;
+    }
     if (!OpenClipboard(window)) {
         if (++capture_attempts < 20)
             SetTimer(window, 1, 25, NULL);
@@ -206,8 +212,8 @@ static int publish(CqItem *p) {
         return 0;
     }
     int ok = EmptyClipboard() && SetClipboardData(p->format, handle) != NULL;
-    own_sequence = seen_sequence = GetClipboardSequenceNumber();
     CloseClipboard();
+    own_sequence = seen_sequence = GetClipboardSequenceNumber();
     if (!ok)
         GlobalFree(handle);
     return ok;

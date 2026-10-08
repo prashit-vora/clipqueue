@@ -1,9 +1,9 @@
-/* Development-only AppKit test host. The distributed daemon does not link AppKit. */
+/* Development-only AppKit test host. The distributed daemonTask does not link AppKit. */
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
 #include <stdio.h>
 #include <stdlib.h>
-static NSTask *daemon;
+static NSTask *daemonTask;
 static NSString *executable;
 static NSWindow *window;
 static NSTextView *source, *sink;
@@ -23,8 +23,8 @@ static void check(BOOL ok, const char *label) {
     if (ok)
         return;
     fprintf(stderr, "FAIL: %s\n", label);
-    if (daemon.running)
-        [daemon terminate];
+    if (daemonTask.running)
+        [daemonTask terminate];
     exit(1);
 }
 static NSString *ctl(NSString *cmd) {
@@ -84,6 +84,14 @@ int main(int argc, const char **argv) {
         executable = [NSString stringWithUTF8String:argv[1]];
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        NSMenu *mainMenu = [NSMenu new];
+        NSMenuItem *editItem = [NSMenuItem new];
+        NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
+        [editMenu addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+        [editMenu addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
+        editItem.submenu = editMenu;
+        [mainMenu addItem:editItem];
+        NSApp.mainMenu = mainMenu;
         [NSApp finishLaunching];
         window = [[NSWindow alloc] initWithContentRect:NSMakeRect(100, 100, 600, 300)
                                              styleMask:NSWindowStyleMaskTitled
@@ -97,13 +105,13 @@ int main(int argc, const char **argv) {
         [window.contentView addSubview:source];
         [window.contentView addSubview:sink];
         focus(sink);
-        daemon = [NSTask new];
-        daemon.executableURL = [NSURL fileURLWithPath:executable];
-        daemon.arguments = @[ @"--daemon" ];
+        daemonTask = [NSTask new];
+        daemonTask.executableURL = [NSURL fileURLWithPath:executable];
+        daemonTask.arguments = @[ @"--daemon" ];
         NSError *error = nil;
-        check([daemon launchAndReturnError:&error], "start daemon");
+        check([daemonTask launchAndReturnError:&error], "start daemon");
         pump(0.6);
-        check(daemon.running, "daemon running (Accessibility permission required)");
+        check(daemonTask.running, "daemon running (Accessibility permission required)");
         keys(12, 1, kCGEventFlagMaskCommand | kCGEventFlagMaskAlternate);
         pump(0.2);
         check([ctl(@"status") containsString:@": on,"], "toggle via Command+Option+Q");
@@ -147,8 +155,8 @@ int main(int argc, const char **argv) {
         pump(0.35);
         expect(@"ABCCCpausedsnowman ☃", "Unicode keyboard paste");
         ctl(@"stop");
-        [daemon waitUntilExit];
-        check(daemon.terminationStatus == 0, "graceful exit");
+        [daemonTask waitUntilExit];
+        check(daemonTask.terminationStatus == 0, "graceful exit");
         puts("PASS: macOS real-window keyboard integration");
         return 0;
     }
