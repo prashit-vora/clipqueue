@@ -63,16 +63,20 @@ Uses system X11, XFixes and zlib. Full Linux installation, configuration and scr
 - Windows accepts Unicode text, PNG and DIB/DIBV5 screenshots. macOS accepts UTF-8/UTF-16 text, PNG, TIFF and JPEG. Native image decoders hash pixel data plus dimensions for images up to 16 megapixels, so repeated copies can match despite different file encoding or metadata. Original bytes are retained for paste. Unsupported image normalization falls back to hashing original bytes. Lossy encodings, color profiles and alpha rounding can produce different pixels.
 - Linux uses its bounded PNG decoder; details are in the Linux guide.
 - Pasting does not reset duplicate tracking. Clearing the queue or changing modes does.
-- Capacity: 200 entries, 256 MiB of queued payloads, at most 64 MiB per item. New entries are rejected at capacity; existing entries are not silently evicted.
+- Capacity: 200 entries, 256 MiB of queued payloads, at most 64 MiB per item. The last pasted item can retain up to another 64 MiB for undo. New entries are rejected at capacity; existing entries are not silently evicted.
 - Nothing is saved as clipboard history or sent over the network. Stop/log out forgets the queue. Clearing the queue leaves the system clipboard unchanged.
 
 On Windows/Mac, use screenshot shortcuts that **copy to the clipboard**. For example, Win+Shift+S or Command+Control+Shift+4. Screenshot shortcuts that only save a file do not change the clipboard, so they cannot be captured by these ports. Your shortcuts are not changed. Linux retains its existing screenshot-folder watcher.
 
-The queue advances when a paste key event is delivered, since arbitrary destination apps provide no confirmation that they accepted an image/text. Give the destination time to paste before pressing again; an application that rejects the content still consumes the entry. Windows cannot inject paste into an elevated administrator application from a normal process. Mac Secure Input can prevent global keyboard handling. The new ports need real-desktop compatibility testing beyond the automated clipboard tests.
+Windows/Mac buffer separate paste keypresses (up to 200 pending requests) and dispatch them in order, at least 150 ms apart. Holding V down does not consume the whole queue. Switching to another foreground window on Windows or another foreground application on Mac cancels pending requests and leaves the remaining clipboard entries queued. Turning queue mode off, clearing, or undoing also cancels pending requests.
+
+The queue advances when the paste shortcut is dispatched: arbitrary destination apps provide no confirmation that they accepted the content. **`clipqueue undo` restores the last dispatched item to the front**, including an image a text-only app rejected. It does not undo an edit in the destination app. Only the most recent queued paste can be restored, and clearing/stop forgets that recovery item. Extremely slow applications may still read the clipboard after a later paste replaces it; the delay is not an application acknowledgment. Windows cannot inject paste into an elevated administrator application from a normal process. Mac Secure Input can prevent global keyboard handling.
+
+Mac clipboard monitoring checks every 100 ms; multiple distinct clipboard changes between checks can be missed. File-only screenshot monitoring on Windows/Mac remains unsupported. These limits are separate from the paste-request fix.
 
 ## Commands
 
-`start`, `status`, `on`, `off`, `toggle`, `clear`, `stop`, and `--daemon` are available on all platforms. `--daemon` runs directly for service supervisors. Linux additionally supports `undo` and configurable shortcuts. The Windows/Mac ports currently use fixed control shortcuts and have no undo command.
+`start`, `status`, `on`, `off`, `toggle`, `clear`, `undo`, `stop`, and `--daemon` are available on all platforms. `--daemon` runs directly for service supervisors. Linux additionally supports configurable shortcuts. The Windows/Mac ports currently use fixed control shortcuts.
 
 ## Memory
 
@@ -82,7 +86,7 @@ CI publishes actual Windows working-set/private-byte and Mac resident-memory sam
 
 ## Tests and builds
 
-GitHub Actions compiles on Linux, Windows and Mac, tests the portable C queue, exercises the Windows/Mac native Unicode clipboard round trip, and produces installable Windows x64 and Mac universal artifacts. Linux also runs image identity tests; portable queue tests run under AddressSanitizer/UndefinedBehaviorSanitizer.
+GitHub Actions compiles on Linux, Windows and Mac, tests the portable C queue, exercises Windows/Mac Unicode and PNG clipboard transfers and decoded-image identity, and produces installable Windows x64 and Mac universal artifacts. Linux also runs image identity tests; portable queue tests run under AddressSanitizer/UndefinedBehaviorSanitizer.
 
 ```sh
 make test
@@ -90,4 +94,6 @@ cc -std=c11 -Isrc tests/portable/core_test.c src/core.c src/sha256.c -o build/co
 build/core-test
 ```
 
-The portable tests check FIFO order, consecutive duplicates across pastes and mode changes, image identity independent of encoded bytes, dimensions, capacity rejection/recovery and SHA-256. Native `--self-test` replaces the test machine's clipboard; run it in an isolated development session. macOS CI cannot grant user Accessibility permission, so it does not prove that global shortcuts work on an authorized desktop. Linux's fuller Xvfb integration suite is documented in the Linux guide.
+The portable tests check FIFO order, consecutive duplicates across pastes and mode changes, image identity independent of encoded bytes, dimensions, capacity rejection/recovery, undo, rapid-request buffering and SHA-256. Native `--self-test` replaces the test machine's clipboard; run it in an isolated development session.
+
+Desktop integration tests launch a separate daemon process and real Win32 EDIT/AppKit NSTextView windows. They send normal copy/paste keyboard events and check the resulting text, three immediate paste presses, consecutive-copy filtering, no self-recapture, undo, empty/paused passthrough, toggle/clear shortcuts and Unicode. These tests need an interactive desktop and keyboard permissions; they fail rather than silently skip if unavailable. The AppKit test host is development-only and is not linked into the Mac daemon. Tests of native editors do not establish compatibility with every third-party application. Linux's Xvfb integration suite is documented in the Linux guide.
