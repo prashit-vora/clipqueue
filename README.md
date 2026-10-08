@@ -1,65 +1,82 @@
 # ClipQueue
 
-Copy a few things. Paste them in the same order.
-
-## Use it
-
-Open **ClipQueue** from your applications menu, or double-click `Launch.sh` and choose Run.
-
-1. Turn on the switch at the top right.
-2. Use your existing **Ctrl+C** and screenshot shortcuts several times.
-3. Click the destination and press your usual **Ctrl+V** once per item.
-
-Clipboard-manager handoffs are ignored when they contain the image or text already captured, so a screenshot is added once. Separate copies of identical content are still kept as separate items.
-
-Text and images share one queue. The oldest item is pasted first. When the queue is empty, Ctrl+V works normally. Turn the switch off to return to ordinary clipboard use while keeping queued items.
-
-**No desktop shortcut settings are changed and no new shortcuts are added.** ClipQueue temporarily handles Ctrl+V while it is running so it can supply the next item, then forwards your original keystroke to the destination. Ctrl+Shift+V and other shortcuts retain their existing behavior and do not advance the queue. Right-click Paste does not advance it either.
-
-Your existing screenshot-to-clipboard shortcuts work. The app also picks up newly created files named `Screenshot…png/jpg/jpeg` in Pictures, Pictures/Screenshots (if it exists when the app starts), and the screenshot tool's configured save folders. It does not import old screenshots. Screenshots with custom names or saved elsewhere can be copied to the clipboard. The **Capture area** button is an optional way to capture directly into the queue without saving a file; drag to select, Escape to cancel.
-
-Close the window to leave ClipQueue running in the tray, or minimized if no tray is available. Click the tray icon or reopen the launcher to see it. **Quit** exits and forgets the queue. It does not start automatically at login.
+A small **C background daemon for Linux X11**. Collect text and screenshots, then paste them in first-in, first-out order using ordinary **Ctrl+V**. No application window, Python runtime, GTK, Electron, package downloads, or network access at runtime.
 
 ## Controls
 
-- **Restore last paste:** puts the last sent item back at the front if you pasted in the wrong place or the destination rejected it. It does not undo changes in the destination.
-- **×:** removes one queued item.
-- **Clear:** forgets all queued items and the restore item. The current system clipboard remains unchanged.
-- **Queue switch:** turns collection and FIFO pasting on or off.
+| Action | Shortcut |
+|---|---|
+| Toggle queue mode | **Ctrl+Alt+Q** |
+| Clear the queue | **Ctrl+Alt+Backspace** |
+| Paste the oldest queued item | **Ctrl+V** |
+| Copy text / take screenshots | Your existing shortcuts |
 
-Images need a destination that accepts pasted images. ClipQueue cannot know whether another application accepted a paste; it advances when it forwards Ctrl+V. Text is collected as plain text, so source formatting is not preserved. Files and arbitrary clipboard formats are not supported.
+A brief status pop-up confirms toggle/clear actions; it never takes keyboard focus. Queue mode starts **off**. When off, or when the queue is empty, Ctrl+V works normally. Ctrl+Shift+V, right-click Paste, and middle-click retain their normal behavior and do not advance the queue.
 
-## Privacy and limits
-
-ClipQueue stores its queue only in memory, with no network requests or history files. Collecting is off when you first launch it. While it is on, anything copied as text or an image can enter the queue; pause it when you don't want copies retained. Screenshot files created by your existing screenshot tool still remain where that tool saved them. The system clipboard and any other clipboard manager are separate from ClipQueue's memory.
-
-The queue holds up to 200 items or 256 MB of image/text data. If full, collection pauses without dropping the existing queue. Paste or remove items, then turn collection back on. Allow each copy to arrive in the queue before replacing the clipboard again; content overwritten before the desktop transfers it cannot be recovered.
-
-## Current status
-
-The clipboard-manager duplicate-capture fix passes its regression tests. The live desktop workflow has also been confirmed working after restart.
-
-## Supported computer
-
-This release supports **Linux X11**, tested on **Linux Mint 22.1 / Cinnamon**. Wayland, Windows and macOS are not supported yet. `queue_model.py` is independent of the desktop, so the queue can be reused when native backends are added for those systems. Supporting them also requires platform-specific clipboard, permission, screenshot and shortcut integration, and testing on each OS.
-
-Uses Python 3, GTK 3, PyGObject, python-xlib and Cairo. On Debian/Ubuntu/Mint X11, install the relevant packages with:
+## Build and install
 
 ```sh
-sudo apt install python3 python3-gi python3-gi-cairo python3-xlib gir1.2-gtk-3.0
+make
+make install
+~/.local/bin/clipqueue start
 ```
 
-Run `python3 install.py` from this folder to add or refresh the applications-menu launcher. Keep the folder in place afterwards. To uninstall the launcher, remove `~/.local/share/applications/clipqueue.desktop`; quit ClipQueue and delete its folder if desired.
+The compiler and X11 development headers are needed **only to build**. On Debian/Ubuntu/Mint: `build-essential libx11-dev libxfixes-dev`. The running program uses the system C, X11, and XFixes libraries already supplied by an X11 desktop. It does not mean literally zero shared libraries.
 
-## Validation
-
-The automated suite checks FIFO ordering, mixed text/images, duplicate copies, queue limits, restore, remove and clear. The isolated desktop integration test exercises actual Ctrl+V input, Unicode, paused mode, empty-queue fallback, exact image pixel transfer, prevention of self-capture, new saved screenshots, area selection and cancellation. A separate regression test runs Mint’s real clipboard service to verify screenshot handoffs, intentional repeated copies, and handoffs after a queue paste.
+The installer adds `~/.local/bin/clipqueue`, a configuration file, and a desktop-login autostart entry. The process runs in the background, initially paused, after each graphical login. It needs no root access. The applications-menu launcher also starts the background process; it does not open a window.
 
 ```sh
-python3 -m unittest discover -s tests -v
-# Integration test requires xclip and an isolated X11 display, such as Xvfb:
-DISPLAY=:97 XDG_SESSION_TYPE=x11 PYTHONPATH=. python3 tests/integration.py
-DISPLAY=:97 PYTHONPATH=. dbus-run-session -- python3 tests/clipboard_handoff.py
+clipqueue status  # Mode, item count, memory and last action; never clipboard contents
+clipqueue on
+clipqueue off
+clipqueue toggle
+clipqueue clear
+clipqueue undo    # Restore the last pasted item to the front
+clipqueue stop   # Gracefully stop; clears the in-memory queue
+clipqueue --daemon  # Foreground mode for debugging or a service supervisor
 ```
 
-The backend uses GTK's [clipboard API](https://docs.gtk.org/gtk3/class.Clipboard.html) and X11's [keyboard event replay](https://www.x.org/releases/X11R7.6/doc/libX11/specs/libX11/libX11.html).
+If `~/.local/bin` is not in your PATH, use the full executable path.
+
+## Configuration
+
+Edit `~/.config/clipqueue/config` (or `$XDG_CONFIG_HOME/clipqueue/config`), then stop/start the daemon:
+
+```ini
+toggle_key=Control+Alt+q
+clear_key=Control+Alt+BackSpace
+quiet=false
+# screenshot_dir=/absolute/path/to/screenshots
+```
+
+A conflicting shortcut causes startup to fail instead of changing another program's binding. Copy, paste and screenshot settings in the desktop are never rewritten. `quiet=true` disables temporary status pop-ups.
+
+## Clipboard behavior
+
+- UTF-8 text, PNG images and JPEG images share one FIFO queue. Text is plain text, without rich formatting.
+- Mint clipboard-manager handoffs are ignored when they republish content already captured.
+- Large clipboard transfers use X11's incremental transfer protocol in both directions.
+- Screenshot-to-clipboard keys work unchanged. New PNG files named `Screenshot…` saved under `~/Pictures`, `~/Pictures/Screenshots`, or the configured extra screenshot folder also enter the queue. Watched folders must exist at startup. Existing files are not imported.
+- Pasting advances the queue when Ctrl+V is forwarded. Another application may reject the content (for example, images in a plain text editor); `clipqueue undo` restores the last item for another attempt. It does not undo edits in that application.
+- Clearing the queue leaves the system clipboard alone. On graceful stop, the daemon asks the desktop clipboard manager to retain the last clipboard item if one is available. Abrupt termination can lose content currently owned by the process.
+- Capacity: 200 items, 256 MiB of queued payloads, and 64 MiB per captured item. Current/last-paste and active transfer references can retain additional payloads. At capacity, collection pauses rather than dropping existing entries.
+- There is no clipboard history on disk. Stopping or logging out forgets the queue. Screenshot files saved by the desktop remain in their normal folder.
+
+## Platform scope
+
+This release runs on **Linux X11**, tested on Linux Mint 22.1/Cinnamon. Wayland, Windows and macOS are future work. A background process still needs each OS's native clipboard and keyboard integration; changing language alone does not make those interfaces portable.
+
+## Tests
+
+Development-only integration tests use Python, GTK, python-xlib and xclip to exercise real X11 selection transfers. None of these are runtime dependencies of the daemon. Run them on an **isolated** Xvfb server, never your working desktop:
+
+```sh
+DISPLAY=:97 XDG_SESSION_TYPE=x11 python3 tests/native/integration.py
+DISPLAY=:97 XDG_SESSION_TYPE=x11 dbus-run-session -- python3 tests/native/handoff.py
+```
+
+They cover FIFO text/images, Unicode, large transfers, clipboard-manager handoffs, normal paste passthrough, queue controls, restore, saved screenshots, startup conflicts and graceful shutdown. The handoff regression requires Mint's `csd-clipboard`.
+
+## Uninstall
+
+Stop the daemon and remove `~/.local/bin/clipqueue`, `~/.config/autostart/clipqueue.desktop`, and `~/.local/share/applications/clipqueue.desktop`. Remove `~/.config/clipqueue` if you also want to discard its shortcut preferences. Adjust paths if you installed with custom XDG directories or a custom prefix.
