@@ -1,19 +1,51 @@
 # ClipQueue
 
-A small **C background daemon for Linux X11**. Collect text and screenshots, then paste them in first-in, first-out order using ordinary **Ctrl+V**. No application window, Python runtime, GTK, Electron, package downloads, or network access at runtime.
+A small **native C background clipboard queue for Linux X11, Windows and macOS**. Copy text or screenshots several times, then paste in first-in, first-out order using **Ctrl+V** (Windows/Linux) or **Command+V** (Mac). No permanent window, Electron, Python runtime, downloaded runtime packages, or network access.
 
 ## Controls
 
-| Action | Shortcut |
-|---|---|
-| Toggle queue mode | **Ctrl+Alt+Q** |
-| Clear the queue | **Ctrl+Alt+Backspace** |
-| Paste the oldest queued item | **Ctrl+V** |
-| Copy text / take screenshots | Your existing shortcuts |
+| Action | Windows / Linux | macOS |
+|---|---|---|
+| Toggle queue mode | Ctrl+Alt+Q | Command+Option+Q |
+| Clear queue | Ctrl+Alt+Backspace | Command+Option+Delete |
+| Paste next item | Ctrl+V | Command+V |
+| Copy or screenshot | Existing shortcuts | Existing shortcuts |
 
-A brief status pop-up confirms toggle/clear actions; it never takes keyboard focus. Queue mode starts **off**. When off, or when the queue is empty, Ctrl+V works normally. Ctrl+Shift+V, right-click Paste, and middle-click retain their normal behavior and do not advance the queue.
+Queue mode starts **off** at each launch. Turning it off keeps queued items for later. When off or empty, normal paste passes through. Other paste commands (menus, right-click, Ctrl+Shift+V) do not advance the queue. Shortcuts in OS settings are never rewritten. Linux shows a temporary status overlay, Windows plays a system sound, and every platform supports `clipqueue status`.
 
-## Build and install
+## Install
+
+### Windows 10 / 11 (x64)
+
+Extract the Windows build, then run `install.ps1` in PowerShell. If PowerShell's policy blocks local scripts, run the program directly instead of changing system policy:
+
+```powershell
+.\clipqueue.exe start
+.\clipqueue.exe on
+.\clipqueue.exe status
+```
+
+The installer copies the executable to `%LOCALAPPDATA%\ClipQueue` and creates a login startup shortcut. No administrator access or VC++ redistributable is required. Use `uninstall.ps1` to remove it.
+
+To build from source, install Visual Studio Build Tools with **Desktop development with C++**, then run `platform/windows/build.ps1`. The C runtime is statically linked; clipboard, keyboard and image decoding use Windows system DLLs.
+
+### macOS 11+ (Apple Silicon and Intel)
+
+Extract the universal macOS archive and run `sh install.sh`. It installs a background app at `~/Applications/ClipQueue.app`, a command at `~/.local/bin/clipqueue`, and a per-user login LaunchAgent. No Dock icon or main window.
+
+Enable **ClipQueue** in **System Settings → Privacy & Security → Accessibility**, then run the restart command printed by the installer. macOS may also request Input Monitoring. Keyboard controls require the OS permission; the program cannot grant it itself.
+
+```sh
+~/.local/bin/clipqueue status
+~/.local/bin/clipqueue on
+launchctl kickstart "gui/$(id -u)/local.clipqueue.daemon"
+```
+
+Builds are ad-hoc signed, **not Developer ID signed or notarized**. macOS may block a downloaded build. You can inspect/build the source locally, or use Apple's explicit Open Anyway approval for the downloaded app. Replacing an ad-hoc signed build can require granting Accessibility again. The installer does not disable Gatekeeper or other security settings.
+
+To build, install Apple's Command Line Tools and run `platform/macos/build.sh`. Only the system ApplicationServices, CoreFoundation and ImageIO frameworks are linked. Run `sh uninstall.sh` from the extracted archive to uninstall.
+
+### Linux X11
 
 ```sh
 make
@@ -21,74 +53,41 @@ make install
 ~/.local/bin/clipqueue start
 ```
 
-The compiler and X11 development headers are needed **only to build**. On Debian/Ubuntu/Mint: `build-essential libx11-dev libxfixes-dev zlib1g-dev`. The running program uses the system C, X11, XFixes, and zlib libraries already supplied by an X11 desktop. It does not mean literally zero shared libraries.
+Uses system X11, XFixes and zlib. Full Linux installation, configuration and screenshot-folder support: [Linux guide](docs/linux.md). **Wayland is not supported.**
 
-The installer adds `~/.local/bin/clipqueue`, a configuration file, and a desktop-login autostart entry. The process runs in the background, initially paused, after each graphical login. It needs no root access. The applications-menu launcher also starts the background process; it does not open a window.
+## Queue and duplicate filtering
 
-```sh
-clipqueue status  # Mode, item count, memory and last action; never clipboard contents
-clipqueue on
-clipqueue off
-clipqueue toggle
-clipqueue clear
-clipqueue undo    # Restore the last pasted item to the front
-clipqueue stop   # Gracefully stop; clears the in-memory queue
-clipqueue --daemon  # Foreground mode for debugging or a service supervisor
-```
+- One FIFO for plain text and images. Rich text and copied file lists are not preserved.
+- SHA-256 filters **consecutive** duplicate copies: `A A A` adds one item; `A B A` adds three.
+- Text is normalized to UTF-8, then compared exactly. Spaces, case and newlines matter.
+- Windows accepts Unicode text, PNG and DIB/DIBV5 screenshots. macOS accepts UTF-8/UTF-16 text, PNG, TIFF and JPEG. Native image decoders hash pixel data plus dimensions for images up to 16 megapixels, so repeated copies can match despite different file encoding or metadata. Original bytes are retained for paste. Unsupported image normalization falls back to hashing original bytes. Lossy encodings, color profiles and alpha rounding can produce different pixels.
+- Linux uses its bounded PNG decoder; details are in the Linux guide.
+- Pasting does not reset duplicate tracking. Clearing the queue or changing modes does.
+- Capacity: 200 entries, 256 MiB of queued payloads, at most 64 MiB per item. New entries are rejected at capacity; existing entries are not silently evicted.
+- Nothing is saved as clipboard history or sent over the network. Stop/log out forgets the queue. Clearing the queue leaves the system clipboard unchanged.
 
-If `~/.local/bin` is not in your PATH, use the full executable path.
+On Windows/Mac, use screenshot shortcuts that **copy to the clipboard**. For example, Win+Shift+S or Command+Control+Shift+4. Screenshot shortcuts that only save a file do not change the clipboard, so they cannot be captured by these ports. Your shortcuts are not changed. Linux retains its existing screenshot-folder watcher.
 
-## Configuration
+The queue advances when a paste key event is delivered, since arbitrary destination apps provide no confirmation that they accepted an image/text. Give the destination time to paste before pressing again; an application that rejects the content still consumes the entry. Windows cannot inject paste into an elevated administrator application from a normal process. Mac Secure Input can prevent global keyboard handling. The new ports need real-desktop compatibility testing beyond the automated clipboard tests.
 
-Edit `~/.config/clipqueue/config` (or `$XDG_CONFIG_HOME/clipqueue/config`), then stop/start the daemon:
+## Commands
 
-```ini
-toggle_key=Control+Alt+q
-clear_key=Control+Alt+BackSpace
-quiet=false
-# screenshot_dir=/absolute/path/to/screenshots
-```
+`start`, `status`, `on`, `off`, `toggle`, `clear`, `stop`, and `--daemon` are available on all platforms. `--daemon` runs directly for service supervisors. Linux additionally supports `undo` and configurable shortcuts. The Windows/Mac ports currently use fixed control shortcuts and have no undo command.
 
-A conflicting shortcut causes startup to fail instead of changing another program's binding. Copy, paste and screenshot settings in the desktop are never rewritten. `quiet=true` disables temporary status pop-ups.
+## Memory
 
-## Consecutive duplicate filtering
+The **2–3 MB idle RAM target is not a guaranteed cross-platform limit**. Native system libraries, keyboard services and image codecs contribute to process memory; screenshots require additional space. A single uncompressed 1920×1080 RGBA screenshot is about **7.9 MiB**, before queue/OS overhead. The existing Linux version measured about 2.5 MiB RSS with an empty queue.
 
-SHA-256 fingerprints filter repeated copies **only when consecutive**:
+CI publishes actual Windows working-set/private-byte and Mac resident-memory samples beside the builds. `--probe` runs an empty process for two seconds and reports memory **without trimming its working set**. The report states whether the keyboard hook was available. A Mac CI sample without Accessibility permission is only a clipboard/event-loop baseline, not the fully authorized daemon. These samples are not a promise about other machines, long sessions, or image-heavy use.
 
-- `A, A, A` adds A once; `A, B, A` keeps all three.
-- Text is compared as exact UTF-8 content. Case, spaces and newlines matter. Latin-1 clipboard text is converted to UTF-8 first.
-- Static PNGs up to 16 megapixels are decoded to canonical RGBA16 samples; dimensions and pixels are hashed. Different compression, row filters, RGB/RGBA encodings or descriptive metadata do not create duplicates. Color-management metadata is not part of this pixel comparison. Original encoded bytes are preserved for paste.
-- JPEGs, animated PNGs, oversized PNGs and PNGs the bounded decoder cannot normalize use an exact encoded-byte hash. Recopying the same encoded image is filtered; differently encoded JPEGs are not guaranteed to match.
-- Clearing the queue, restoring an item, or changing queue mode resets consecutive-copy tracking, allowing an intentional recopy. Pasting alone does not reset it.
-- Hashing is local, in memory, using SHA-256 implemented in C. PNG decompression uses the system zlib library, not a separate image framework.
+## Tests and builds
 
-## Clipboard behavior
-
-- UTF-8 text, PNG images and JPEG images share one FIFO queue. Text is plain text, without rich formatting.
-- Mint clipboard-manager handoffs are ignored when they republish content already captured.
-- Large clipboard transfers use X11's incremental transfer protocol in both directions.
-- Screenshot-to-clipboard keys work unchanged. New PNG files named `Screenshot…` saved under `~/Pictures`, `~/Pictures/Screenshots`, or the configured extra screenshot folder also enter the queue. Watched folders must exist at startup. Existing files are not imported.
-- Pasting advances the queue when Ctrl+V is forwarded. Another application may reject the content (for example, images in a plain text editor); `clipqueue undo` restores the last item for another attempt. It does not undo edits in that application.
-- Clearing the queue leaves the system clipboard alone. On graceful stop, the daemon asks the desktop clipboard manager to retain the last clipboard item if one is available. Abrupt termination can lose content currently owned by the process.
-- Capacity: 200 items, 256 MiB of queued payloads, and 64 MiB per captured item. Current/last-paste and active transfer references can retain additional payloads. At capacity, collection pauses rather than dropping existing entries.
-- There is no clipboard history on disk. Stopping or logging out forgets the queue. Screenshot files saved by the desktop remain in their normal folder.
-
-## Platform scope
-
-This release runs on **Linux X11**, tested on Linux Mint 22.1/Cinnamon. Wayland, Windows and macOS are future work. A background process still needs each OS's native clipboard and keyboard integration; changing language alone does not make those interfaces portable.
-
-## Tests
-
-Development-only integration tests use Python, GTK, python-xlib and xclip to exercise real X11 selection transfers. None of these are runtime dependencies of the daemon. Run them on an **isolated** Xvfb server, never your working desktop:
+GitHub Actions compiles on Linux, Windows and Mac, tests the portable C queue, exercises the Windows/Mac native Unicode clipboard round trip, and produces installable Windows x64 and Mac universal artifacts. Linux also runs image identity tests; portable queue tests run under AddressSanitizer/UndefinedBehaviorSanitizer.
 
 ```sh
 make test
-DISPLAY=:97 XDG_SESSION_TYPE=x11 python3 tests/native/integration.py
-DISPLAY=:97 XDG_SESSION_TYPE=x11 dbus-run-session -- python3 tests/native/handoff.py
+cc -std=c11 -Isrc tests/portable/core_test.c src/core.c src/sha256.c -o build/core-test
+build/core-test
 ```
 
-They cover standard SHA-256 vectors, all PNG row filters, pixel identity, transparency, indexed/grayscale/16-bit and interlaced PNGs, malformed inputs, consecutive-copy filtering, FIFO text/images, Unicode, large transfers, clipboard-manager handoffs, normal paste passthrough, queue controls, restore, saved screenshots, startup conflicts and clipboard preservation on graceful shutdown. The handoff regression requires Mint's `csd-clipboard`.
-
-## Uninstall
-
-Stop the daemon and remove `~/.local/bin/clipqueue`, `~/.config/autostart/clipqueue.desktop`, and `~/.local/share/applications/clipqueue.desktop`. Remove `~/.config/clipqueue` if you also want to discard its shortcut preferences. Adjust paths if you installed with custom XDG directories or a custom prefix.
+The portable tests check FIFO order, consecutive duplicates across pastes and mode changes, image identity independent of encoded bytes, dimensions, capacity rejection/recovery and SHA-256. Native `--self-test` replaces the test machine's clipboard; run it in an isolated development session. macOS CI cannot grant user Accessibility permission, so it does not prove that global shortcuts work on an authorized desktop. Linux's fuller Xvfb integration suite is documented in the Linux guide.

@@ -1,0 +1,55 @@
+name: Native builds
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo apt-get update && sudo apt-get install -y libx11-dev libxfixes-dev zlib1g-dev
+      - run: make && make test
+      - run: cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g -Isrc tests/portable/core_test.c src/core.c src/sha256.c -o build/core-test && build/core-test
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build native Windows binaries
+        run: ./platform/windows/build.ps1
+      - name: Test queue and native clipboard
+        run: |
+          ./build/core-test.exe
+          if ($LASTEXITCODE) { throw 'Queue tests failed' }
+          ./build/clipqueue-console.exe --self-test
+          if ($LASTEXITCODE) { throw 'Clipboard test failed' }
+          ./build/clipqueue-console.exe --probe | Tee-Object build/memory-windows.json
+          if ($LASTEXITCODE) { throw 'Daemon probe failed' }
+      - name: Package
+        run: |
+          New-Item -ItemType Directory -Force build/package | Out-Null
+          Copy-Item build/clipqueue.exe,platform/windows/install.ps1,platform/windows/uninstall.ps1,README.md,build/memory-windows.json build/package
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ClipQueue-Windows-x64
+          path: build/package/*
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build universal macOS binary
+        run: ./platform/macos/build.sh
+      - name: Test queue and native clipboard
+        run: |
+          build/core-test
+          build/ClipQueue.app/Contents/MacOS/clipqueue --self-test
+          build/ClipQueue.app/Contents/MacOS/clipqueue --probe | tee build/memory-macos.json
+      - name: Package
+        run: |
+          mkdir -p build/package
+          cp -R build/ClipQueue.app build/package/
+          cp platform/macos/install.sh platform/macos/uninstall.sh README.md build/memory-macos.json build/package/
+          cd build/package && tar -czf ../ClipQueue-macOS-universal.tar.gz .
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ClipQueue-macOS-universal
+          path: build/ClipQueue-macOS-universal.tar.gz
