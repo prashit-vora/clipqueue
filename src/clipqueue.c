@@ -1,5 +1,7 @@
 /* ClipQueue: an event-driven, in-memory X11 clipboard queue. */
+#include "png_hash.h"
 #include "sha256.h"
+#include <X11/XKBlib.h>
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/extensions/Xfixes.h>
@@ -25,7 +27,7 @@
 #define MAX_ITEMS 200
 #define CHUNK 65536UL
 #define MAX_OUT 16
-#define VERSION "0.2.0"
+#define VERSION "0.3.0"
 typedef struct Clip {
     unsigned char *data;
     size_t len;
@@ -42,7 +44,7 @@ typedef struct {
     Atom target;
     unsigned char *data;
     size_t len;
-    int phase;
+    int phase, own_handoff;
     double deadline;
 } Capture;
 typedef struct {
@@ -53,7 +55,7 @@ typedef struct {
     double deadline;
 } Transfer;
 static Display *d;
-static Window root, win, osd;
+static Window root, win, osd, last_owner;
 static Atom clipboard, manager, instance, targets, utf8, textplain, textutf8, png, jpeg, incr,
     multiple, timestamp, readprop, statusprop, commandatom;
 static Node *head, *tail;
@@ -150,14 +152,13 @@ static void clear_queue(void) {
     last_paste = NULL;
     reset_previous();
 }
-static void add_clip(Clip *c, int from_manager) {
-    if (from_manager && current && current->target == c->target &&
+static void add_clip(Clip *c, int own_handoff) {
+    if (own_handoff && current && current->target == c->target &&
         !memcmp(current->hash, c->hash, 32)) {
         unref(c);
         return;
     }
-    if (from_manager && have_previous && previous_type == c->target &&
-        !memcmp(previous, c->hash, 32)) {
+    if (have_previous && previous_type == c->target && !memcmp(previous, c->hash, 32)) {
         unref(c);
         return;
     }
@@ -194,11 +195,42 @@ static Clip *new_clip(unsigned char *data, size_t len, Atom target) {
         free(data);
         return NULL;
     }
+    /* Normalize all plain-text targets to UTF-8 before comparing or serving. */
+    if (target == XA_STRING) {
+        size_t extra = 0;
+        for (size_t i = 0; i < len; i++)
+            extra += data[i] >= 128;
+        if (extra > MAX_ITEM - len) {
+            free(c);
+            free(data);
+            return NULL;
+        }
+        unsigned char *converted = malloc(len + extra);
+        if (!converted) {
+            free(c);
+            free(data);
+            return NULL;
+        }
+        size_t j = 0;
+        for (size_t i = 0; i < len; i++) {
+            if (data[i] >= 128) {
+                converted[j++] = 0xc0 | (data[i] >> 6);
+                converted[j++] = 0x80 | (data[i] & 63);
+            } else
+                converted[j++] = data[i];
+        }
+        free(data);
+        data = converted;
+        len += extra;
+    }
+    if (target != png && target != jpeg)
+        target = utf8;
     c->data = data;
     c->len = len;
     c->target = target;
     c->refs = 1;
-    sha256(data, len, c->hash);
+    if (target != png || !png_pixel_hash(data, len, c->hash))
+        sha256(data, len, c->hash);
     return c;
 }
 static void abort_capture(void) {
@@ -214,10 +246,10 @@ static void finish_capture(void) {
     }
     Clip *c = new_clip(cap.data, cap.len, cap.target);
     cap.data = NULL;
-    int is_manager = cap.owner == XGetSelectionOwner(d, manager);
+    int own_handoff = cap.own_handoff;
     abort_capture();
     if (c)
-        add_clip(c, is_manager);
+        add_clip(c, own_handoff);
 }
 static void request_data(Atom target) {
     cap.target = target;
@@ -237,13 +269,14 @@ static int append_data(const unsigned char *data, size_t len) {
     cap.len += len;
     return 1;
 }
-static void start_capture(Window owner) {
+static void start_capture(Window owner, int own_handoff) {
     if (!enabled || owner == None || owner == win)
         return;
     if (owner != XGetSelectionOwner(d, clipboard))
         return;
     abort_capture();
     cap.owner = owner;
+    cap.own_handoff = own_handoff;
     cap.win = XCreateSimpleWindow(d, root, -1, -1, 1, 1, 0, 0, 0);
     XSelectInput(d, cap.win, PropertyChangeMask);
     cap.phase = 1;
@@ -771,6 +804,9 @@ static int daemon_init(void) {
             "A shortcut is in use. Change toggle_key/clear_key in ~/.config/clipqueue/config.\n");
         return 1;
     }
+    Bool repeat_supported;
+    XkbSetDetectableAutoRepeat(d, True, &repeat_supported);
+    last_owner = XGetSelectionOwner(d, clipboard);
     setup_watches();
     status_update();
     return 0;
@@ -779,10 +815,12 @@ static void dispatch(XEvent *e) {
     if (e->type == fixbase + XFixesSelectionNotify) {
         XFixesSelectionNotifyEvent *f = (void *)e;
         if (f->selection == clipboard) {
+            int own_handoff = last_owner == win && f->owner == XGetSelectionOwner(d, manager);
+            last_owner = f->owner;
             if (f->owner == win)
                 own_time = f->selection_timestamp;
             else
-                start_capture(f->owner);
+                start_capture(f->owner, own_handoff);
         }
         return;
     }
@@ -946,8 +984,7 @@ static int run_daemon(int readyfd) {
 int main(int argc, char **argv) {
     const char *cmd = argc > 1 ? argv[1] : "start";
     if (!strcmp(cmd, "--help") || !strcmp(cmd, "help")) {
-        puts("ClipQueue " VERSION
-             " (Linux X11)\nUsage: clipqueue "
+        puts("ClipQueue " VERSION " (Linux X11)\nUsage: clipqueue "
              "start|--daemon|status|on|off|toggle|clear|undo|stop\nControls: Ctrl+Alt+Q toggle; "
              "Ctrl+Alt+Backspace clear; Ctrl+V FIFO paste.\nConfig: ~/.config/clipqueue/config. "
              "Starts paused. No clipboard history on disk.");

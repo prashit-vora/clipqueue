@@ -1,7 +1,7 @@
 """Development-only tests; GTK/Python are NOT application dependencies.
 Run with DISPLAY=:97 on an isolated Xvfb server.
 """
-import json, os, subprocess, time, tempfile
+import json, os, subprocess, time, tempfile, struct, zlib
 from pathlib import Path
 import gi
 gi.require_version('Gtk','3.0')
@@ -66,6 +66,13 @@ with tempfile.TemporaryDirectory() as folder:
   copy(b'ordinary');entry.set_text('');hotkey(['Control_L','v']);assert entry.get_text()=='ordinary'
   assert ctl('status')['queued']==1
   ctl('on');hotkey(['Control_L','Alt_L','BackSpace']);assert ctl('status')['queued']==0
+  # Consecutive duplicate text, alias targets, nonconsecutive repeats and reset.
+  for value in [b'A',b'A',b'A',b'B',b'A',b'A']: copy(value)
+  assert ctl('status')['queued']==3,ctl('status')
+  ctl('clear');copy(b'alias');copy(b'alias','text/plain');assert ctl('status')['queued']==1
+  ctl('clear');copy(b'alias');assert ctl('status')['queued']==1
+  ctl('clear');copy(b'caf\xe9','STRING');assert paste_read()=='café'.encode()
+  ctl('clear')
   # Real incremental clipboard transfer, in both directions.
   large=('Large data 🦋 '*60000).encode()
   copy(large);assert ctl('status')['queued']==1,ctl('status')
@@ -74,17 +81,24 @@ with tempfile.TemporaryDirectory() as folder:
   # Image plus text FIFO and exact PNG bytes retained for output.
   image=GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB,True,8,96,64);image.fill(0x51b987ff)
   _,png=image.save_to_bufferv('png',[],[])
-  copy(png,'image/png');copy(b'after image')
+  copy(png,'image/png')
+  metadata=b'Comment\0same pixels, another PNG encoding'
+  tag=b'tEXt'+metadata
+  variant=png[:33]+struct.pack('>I',len(metadata))+tag+struct.pack('>I',zlib.crc32(tag))+png[33:]
+  copy(variant,'image/png');copy(png,'image/png')
+  assert ctl('status')['queued']==1,ctl('status')
+  copy(b'after image')
   assert ctl('status')['queued']==2
   assert paste_read('image/png')==png
   assert paste_read()==b'after image'
+  # The copied text breaks consecutiveness, so this image should be accepted.
   # Saved PNG with existing shortcut naming enters via inotify.
   image.savev(str(Path(folder,'Pictures','Screenshot test.png')),'png',[],[])
   spin(.3);assert ctl('status')['queued']==1,ctl('status')
   ctl('clear');assert ctl('status')['queued']==0
   ctl('stop');daemon.wait(timeout=3)
   assert daemon.returncode==0
-  print('PASS: native FIFO, normal Ctrl+V, Unicode, large INCR transfers, PNG, pause, clear, undo, toggle/clear hotkeys, saved screenshot, single instance, graceful stop')
+  print('PASS: native FIFO, normal Ctrl+V, Unicode, large INCR transfers, PNG pixel dedup, text dedup, pause, clear, undo, toggle/clear hotkeys, saved screenshot, single instance, graceful stop')
  finally:
   if daemon.poll() is None: daemon.terminate();daemon.wait(timeout=3)
   if sink: sink.destroy()

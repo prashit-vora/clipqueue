@@ -21,7 +21,7 @@ make install
 ~/.local/bin/clipqueue start
 ```
 
-The compiler and X11 development headers are needed **only to build**. On Debian/Ubuntu/Mint: `build-essential libx11-dev libxfixes-dev`. The running program uses the system C, X11, and XFixes libraries already supplied by an X11 desktop. It does not mean literally zero shared libraries.
+The compiler and X11 development headers are needed **only to build**. On Debian/Ubuntu/Mint: `build-essential libx11-dev libxfixes-dev zlib1g-dev`. The running program uses the system C, X11, XFixes, and zlib libraries already supplied by an X11 desktop. It does not mean literally zero shared libraries.
 
 The installer adds `~/.local/bin/clipqueue`, a configuration file, and a desktop-login autostart entry. The process runs in the background, initially paused, after each graphical login. It needs no root access. The applications-menu launcher also starts the background process; it does not open a window.
 
@@ -51,6 +51,17 @@ quiet=false
 
 A conflicting shortcut causes startup to fail instead of changing another program's binding. Copy, paste and screenshot settings in the desktop are never rewritten. `quiet=true` disables temporary status pop-ups.
 
+## Consecutive duplicate filtering
+
+SHA-256 fingerprints filter repeated copies **only when consecutive**:
+
+- `A, A, A` adds A once; `A, B, A` keeps all three.
+- Text is compared as exact UTF-8 content. Case, spaces and newlines matter. Latin-1 clipboard text is converted to UTF-8 first.
+- Static PNGs up to 16 megapixels are decoded to canonical RGBA16 samples; dimensions and pixels are hashed. Different compression, row filters, RGB/RGBA encodings or descriptive metadata do not create duplicates. Color-management metadata is not part of this pixel comparison. Original encoded bytes are preserved for paste.
+- JPEGs, animated PNGs, oversized PNGs and PNGs the bounded decoder cannot normalize use an exact encoded-byte hash. Recopying the same encoded image is filtered; differently encoded JPEGs are not guaranteed to match.
+- Clearing the queue, restoring an item, or changing queue mode resets consecutive-copy tracking, allowing an intentional recopy. Pasting alone does not reset it.
+- Hashing is local, in memory, using SHA-256 implemented in C. PNG decompression uses the system zlib library, not a separate image framework.
+
 ## Clipboard behavior
 
 - UTF-8 text, PNG images and JPEG images share one FIFO queue. Text is plain text, without rich formatting.
@@ -71,11 +82,12 @@ This release runs on **Linux X11**, tested on Linux Mint 22.1/Cinnamon. Wayland,
 Development-only integration tests use Python, GTK, python-xlib and xclip to exercise real X11 selection transfers. None of these are runtime dependencies of the daemon. Run them on an **isolated** Xvfb server, never your working desktop:
 
 ```sh
+make test
 DISPLAY=:97 XDG_SESSION_TYPE=x11 python3 tests/native/integration.py
 DISPLAY=:97 XDG_SESSION_TYPE=x11 dbus-run-session -- python3 tests/native/handoff.py
 ```
 
-They cover FIFO text/images, Unicode, large transfers, clipboard-manager handoffs, normal paste passthrough, queue controls, restore, saved screenshots, startup conflicts and graceful shutdown. The handoff regression requires Mint's `csd-clipboard`.
+They cover standard SHA-256 vectors, all PNG row filters, pixel identity, transparency, indexed/grayscale/16-bit and interlaced PNGs, malformed inputs, consecutive-copy filtering, FIFO text/images, Unicode, large transfers, clipboard-manager handoffs, normal paste passthrough, queue controls, restore, saved screenshots, startup conflicts and clipboard preservation on graceful shutdown. The handoff regression requires Mint's `csd-clipboard`.
 
 ## Uninstall
 
